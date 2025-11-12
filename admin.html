@@ -1,0 +1,769 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0"/>
+    <title>WideFind Admin Panel</title>
+    <!-- Tailwind CSS for styling -->
+    <script src="https://cdn.tailwindcss.com"></script>
+    <!-- Font Awesome for icons -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0-beta3/css/all.min.css">
+    <style>
+        .tab-content { display: none; }
+        .tab-content.active { display: block; }
+        .modal { display: none; position: fixed; z-index:100; left:0; top:0; width:100%; height:100%; overflow:auto; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background:#fff; margin:10% auto; padding:24px; border-radius:8px; width:80%; max-width:600px; }
+    </style>
+</head>
+<body class="bg-gray-100 font-sans">
+
+<script type="module">
+    // Firebase imports
+    import { initializeApp } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-app.js";
+    import { getAuth, onAuthStateChanged, signInWithEmailAndPassword, signOut } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-auth.js";
+    import { getFirestore, setLogLevel, doc, getDoc, setDoc, addDoc, updateDoc, deleteDoc, onSnapshot, collection } from "https://www.gstatic.com/firebasejs/11.6.1/firebase-firestore.js";
+
+    // Paste your firebaseConfig below (kept from your original file)
+    const firebaseConfig = {
+        apiKey: "AIzaSyDFsnU6n1-ag1XB8QgJcj5rqjWHxaJ71v8",
+        authDomain: "my-ecom-site-168ab.firebaseapp.com",
+        projectId: "my-ecom-site-168ab",
+        storageBucket: "my-ecom-site-168ab.firebasestorage.app",
+        messagingSenderId: "995581566071",
+        appId: "1:995581566071:web:1640d0236302d369aefa72",
+        measurementId: "G-NLHKNBHCFN"
+    };
+
+    // Global
+    let app, auth, db;
+    let currentEditingProductId = null;
+
+    // UI refs (will be queried after DOM load)
+    let loginScreen, adminDashboard, loadingIndicator, loginForm, loginError, adminEmailDisplay, logoutButton, tabs, tabContents;
+    let productForm, productFormTitle, productFormError, cancelEditButton, productsList;
+    let ordersList, settingsForm, settingsSaveStatus;
+    let couponForm, couponList, couponSaveStatus;
+    let orderModal, orderModalContent, orderModalClose;
+    let categoriesList, categoryAddInput, addCategoryBtn;
+
+    function initializeFirebase() {
+        if (!firebaseConfig.apiKey) {
+            document.body.innerHTML = `<div class="p-8 bg-red-800 text-white text-center"><h1>Error: Firebase Config Missing</h1><p>Please add firebaseConfig.</p></div>`;
+            return;
+        }
+        try {
+            app = initializeApp(firebaseConfig);
+            auth = getAuth(app);
+            db = getFirestore(app);
+            setLogLevel('Debug');
+            setupAuthListener();
+        } catch (e) {
+            console.error("Firebase init error:", e);
+            document.body.innerHTML = `<div class="p-8 bg-red-800 text-white text-center"><h1>Error initializing Firebase</h1><pre>${e.message}</pre></div>`;
+        }
+    }
+
+    function setupAuthListener() {
+        onAuthStateChanged(auth, (user) => {
+            loadingIndicator.classList.add('hidden');
+            if (user) {
+                adminEmailDisplay.textContent = user.email;
+                loginScreen.classList.add('hidden');
+                adminDashboard.classList.remove('hidden');
+                attachFirestoreListeners();
+            } else {
+                loginScreen.classList.remove('hidden');
+                adminDashboard.classList.add('hidden');
+            }
+        });
+    }
+
+    async function handleLogin(e) {
+        e.preventDefault();
+        loginError.textContent = '';
+        const email = loginForm.email.value;
+        const password = loginForm.password.value;
+        try {
+            await signInWithEmailAndPassword(auth, email, password);
+        } catch (err) {
+            loginError.textContent = `Login failed: ${err.message}`;
+        }
+    }
+    async function handleLogout() {
+        if (confirm("Log out?")) {
+            try { await signOut(auth); window.location.reload(); } catch (e) { console.error(e); }
+        }
+    }
+
+    function handleTabClick(e) {
+        e.preventDefault();
+        const target = e.target.closest('a').getAttribute('href').substring(1);
+        tabs.forEach(t => { t.classList.remove('bg-orange-600','text-white'); t.classList.add('bg-gray-200','text-gray-700'); });
+        e.target.closest('a').classList.add('bg-orange-600','text-white');
+        tabContents.forEach(tc => tc.id === target ? tc.classList.add('active') : tc.classList.remove('active'));
+    }
+
+    function attachFirestoreListeners() {
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+        const productsPath = `artifacts/${appId}/public/data/products`;
+        const ordersPath = `artifacts/${appId}/public/data/orders`;
+        const settingsPath = `artifacts/${appId}/public/data/config/siteSettings`;
+        const couponsPath = `artifacts/${appId}/public/data/config/coupons`;
+
+        // Products
+        const productsRef = collection(db, productsPath);
+        onSnapshot(productsRef, (snap) => {
+            const products = [];
+            snap.forEach(d => products.push({ id: d.id, ...d.data() }));
+            renderProductsList(products);
+        }, (err) => { productsList.innerHTML = `<p class="text-red-500">Error loading products: ${err.message}</p>`; });
+
+        // Orders
+        const ordersRef = collection(db, ordersPath);
+        onSnapshot(ordersRef, (snap) => {
+            const orders = [];
+            snap.forEach(d => orders.push({ id: d.id, ...d.data() }));
+            renderOrdersList(orders);
+        }, (err) => { ordersList.innerHTML = `<p class="text-red-500">Error loading orders: ${err.message}</p>`; });
+
+        // Settings (single doc)
+        const settingsRef = doc(db, settingsPath);
+        onSnapshot(settingsRef, (d) => {
+            if (d.exists()) renderSettingsForm(d.data());
+            else renderSettingsForm({});
+        }, (err) => { settingsSaveStatus.textContent = `Error: ${err.message}`; });
+
+        // Coupons (single doc)
+        const couponsRef = doc(db, couponsPath);
+        onSnapshot(couponsRef, (d) => {
+            const list = d.exists() ? d.data().validCodes || [] : [];
+            renderCouponList(list);
+        }, (err) => { couponSaveStatus.textContent = `Error: ${err.message}`; });
+
+        // Categories stored inside settings.categoryList (an array of names)
+        // Render happens in renderSettingsForm
+    }
+
+    // ----- RENDER FUNCTIONS -----
+    function renderProductsList(products) {
+        productsList.innerHTML = '';
+        if (!products.length) { productsList.innerHTML = '<p class="text-gray-500">No products found.</p>'; return; }
+
+        const table = document.createElement('table');
+        table.className = 'min-w-full bg-white';
+        table.innerHTML = `
+            <thead class="bg-gray-50">
+                <tr>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Image</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">SKU</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Name</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Price</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Category</th>
+                    <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+                </tr>
+            </thead>
+            <tbody class="divide-y divide-gray-200"></tbody>
+        `;
+        const tbody = table.querySelector('tbody');
+
+        products.forEach(p => {
+            let firstImage = 'https://placehold.co/50x50/eee/ccc?text=No+Img';
+            if (Array.isArray(p.images) && p.images.length) firstImage = p.images[0];
+            else if (typeof p.images === 'string' && p.images.length) firstImage = p.images.split(',')[0];
+
+            const orig = parseFloat(p.originalPrice) || 0;
+            const dp = parseFloat(p.discountPercent) || 0;
+            const da = parseFloat(p.discountAmount) || 0;
+            let badge = '';
+            if (dp > 0) badge = `<span class="ml-2 inline-block bg-red-500 text-white text-xs px-2 py-1 rounded">-${Math.round(dp)}%</span>`;
+            else if (da > 0 && orig > 0) {
+                const pct = Math.round((da / orig) * 100);
+                badge = `<span class="ml-2 inline-block bg-red-500 text-white text-xs px-2 py-1 rounded">-${pct}%</span>`;
+            }
+            const priceDisplay = `৳${p.price} (<s>৳${p.originalPrice}</s>)`;
+
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="px-4 py-3"><img src="${firstImage}" alt="${p.name}" class="w-12 h-12 object-cover rounded"></td>
+                <td class="px-4 py-3 text-sm text-gray-700">${p.sku || ''}</td>
+                <td class="px-4 py-3 text-sm font-medium text-gray-900">${p.name || ''}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${priceDisplay} ${badge}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${p.category || ''}</td>
+                <td class="px-4 py-3 text-sm">
+                    <button data-id="${p.id}" class="edit-btn text-blue-600 hover:text-blue-800 mr-3">Edit</button>
+                    <button data-id="${p.id}" data-name="${p.name}" class="delete-btn text-red-600 hover:text-red-800">Delete</button>
+                </td>
+            `;
+            tbody.appendChild(tr);
+        });
+
+        productsList.appendChild(table);
+
+        productsList.querySelectorAll('.edit-btn').forEach(btn => btn.addEventListener('click', () => handleEditProduct(btn.dataset.id)));
+        productsList.querySelectorAll('.delete-btn').forEach(btn => btn.addEventListener('click', () => handleDeleteProduct(btn.dataset.id, btn.dataset.name)));
+    }
+
+    function renderOrdersList(orders) {
+        ordersList.innerHTML = '';
+        if (!orders.length) { ordersList.innerHTML = '<p class="text-gray-500">No orders found.</p>'; return; }
+        const table = document.createElement('table');
+        table.className = 'min-w-full bg-white divide-y divide-gray-200';
+        table.innerHTML = `
+            <thead class="bg-gray-50"><tr>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Order ID</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Customer</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Total</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Payment</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Status</th>
+                <th class="px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase">Actions</th>
+            </tr></thead>
+            <tbody class="divide-y divide-gray-200"></tbody>`;
+        const tbody = table.querySelector('tbody');
+        orders.sort((a,b) => (b.timestamp?.seconds||0) - (a.timestamp?.seconds||0));
+        orders.forEach(order => {
+            const tr = document.createElement('tr');
+            tr.innerHTML = `
+                <td class="px-4 py-3 text-sm text-gray-700">${order.id?.substring(0,8) || ''}...</td>
+                <td class="px-4 py-3 text-sm font-medium text-gray-900">${order.customer?.name || ''} (${order.customer?.phone || ''})</td>
+                <td class="px-4 py-3 text-sm text-gray-700">৳${(order.grandTotal || 0).toFixed(0)}</td>
+                <td class="px-4 py-3 text-sm text-gray-700">${order.paymentMethod || ''}</td>
+                <td class="px-4 py-3 text-sm">
+                    <select data-id="${order.id}" class="order-status-select rounded-md border-gray-300 shadow-sm">
+                        <option value="Pending" ${order.status==='Pending' ? 'selected' : ''}>Pending</option>
+                        <option value="Processing" ${order.status==='Processing' ? 'selected' : ''}>Processing</option>
+                        <option value="Shipped" ${order.status==='Shipped' ? 'selected' : ''}>Shipped</option>
+                        <option value="Delivered" ${order.status==='Delivered' ? 'selected' : ''}>Delivered</option>
+                        <option value="Cancelled" ${order.status==='Cancelled' ? 'selected' : ''}>Cancelled</option>
+                    </select>
+                </td>
+                <td class="px-4 py-3 text-sm"><button data-id="${order.id}" class="view-order-btn text-blue-600 hover:text-blue-800">View</button></td>
+            `;
+            tbody.appendChild(tr);
+        });
+        ordersList.appendChild(table);
+        ordersList.querySelectorAll('.view-order-btn').forEach(btn => btn.addEventListener('click', () => handleViewOrder(btn.dataset.id, orders)));
+        ordersList.querySelectorAll('.order-status-select').forEach(sel => sel.addEventListener('change', (e)=> handleUpdateOrderStatus(e.target.dataset.id, e.target.value)));
+    }
+
+    function renderSettingsForm(settings) {
+        settingsForm.paymentNumber.value = settings.paymentNumber || '';
+        settingsForm.logoUrl.value = settings.logoUrl || '';
+        const banners = settings.adBanners || [];
+        settingsForm.banner1_img.value = banners[0]?.img || '';
+        settingsForm.banner1_text.value = banners[0]?.text || '';
+        settingsForm.banner2_img.value = banners[1]?.img || '';
+        settingsForm.banner2_text.value = banners[1]?.text || '';
+        settingsForm.banner3_img.value = banners[2]?.img || '';
+        settingsForm.banner3_text.value = banners[2]?.text || '';
+
+        // category list (text-only), unlimited
+        const categories = settings.categoryList || ['Popular','T-Shirt','Sunglass','Watch',"Men's Fashion","Women's Fashion",'Electronics','Home Goods','Accessories'];
+        categoriesList.innerHTML = '';
+        categories.forEach((c, idx) => {
+            const li = document.createElement('li');
+            li.className = 'flex justify-between items-center py-1';
+            li.innerHTML = `<span>${c}</span><div><button data-idx="${idx}" class="remove-cat-btn text-red-500 text-sm">Remove</button></div>`;
+            categoriesList.appendChild(li);
+        });
+        // remove handlers
+        categoriesList.querySelectorAll('.remove-cat-btn').forEach(btn => {
+            btn.addEventListener('click', async () => {
+                const idx = parseInt(btn.dataset.idx);
+                const newCats = categories.filter((_,i) => i !== idx);
+                try {
+                    const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+                    const settingsDocPath = `artifacts/${appId}/public/data/config/siteSettings`;
+                    await setDoc(doc(db, settingsDocPath), { categoryList: newCats }, { merge: true });
+                } catch (err) {
+                    alert('Error removing category: ' + err.message);
+                }
+            });
+        });
+    }
+
+    function renderCouponList(coupons) {
+        couponList.innerHTML = '';
+        if (!coupons.length) { couponList.innerHTML = '<p class="text-gray-500 text-sm">No coupons added yet.</p>'; return; }
+        coupons.forEach(c => {
+            const typeText = c.type === 'percent' ? `${c.amount}% off` : `৳${c.amount} off`;
+            const allowedText = (c.allowedProducts && c.allowedProducts.length) ? `Allowed: ${c.allowedProducts.join(', ')}` : 'Allowed: All';
+            const usageText = (typeof c.usageLimit === 'number' && c.usageLimit > 0) ? `Uses left: ${c.usageLimit}` : 'Uses: Unlimited';
+            const div = document.createElement('div');
+            div.className = 'flex justify-between items-center bg-gray-50 p-2 rounded';
+            div.innerHTML = `<div><div class="font-mono font-medium">${c.code} — <span class="text-sm text-gray-600">${typeText}</span></div><div class="text-xs text-gray-500">${allowedText} · ${usageText}</div></div><div><button data-code="${c.code}" class="delete-coupon-btn text-red-500 hover:text-red-700 text-xs">Remove</button></div>`;
+            couponList.appendChild(div);
+        });
+        couponList.querySelectorAll('.delete-coupon-btn').forEach(btn => btn.addEventListener('click', () => handleDeleteCoupon(btn.dataset.code)));
+    }
+
+    function handleViewOrder(orderId, orders) {
+        const order = orders.find(o => o.id === orderId);
+        if (!order) return;
+        const cartHtml = (order.cart || []).map(i => `<li class="flex justify-between py-1"><span>${i.name} ${i.size?`(${i.size})`:''} (x${i.qty})</span><span class="font-medium">৳${(i.price*i.qty).toFixed(0)}</span></li>`).join('');
+        orderModalContent.innerHTML = `<h3 class="text-xl font-bold mb-4">Order ${order.id}</h3>
+            <div><p><strong>Customer:</strong> ${order.customer?.name}</p><p><strong>Phone:</strong> ${order.customer?.phone}</p><p><strong>Address:</strong> ${order.customer?.address}</p></div>
+            <h4 class="font-semibold mt-4">Cart Items</h4><ul class="divide-y">${cartHtml}</ul>
+            <div class="mt-2 pt-2 border-t space-y-1 text-right"><p>Subtotal: ৳${(order.productTotal||0).toFixed(0)}</p><p>Delivery: ৳${(order.deliveryFee||0).toFixed(0)}</p><p class="text-green-600">Discount: - ৳${(order.discount||0).toFixed(0)}</p><p class="text-lg font-bold">Grand Total: ৳${(order.grandTotal||0).toFixed(0)}</p></div>`;
+        orderModal.style.display = 'block';
+    }
+
+    // ----- CRUD / Form Handlers -----
+    async function handleProductFormSubmit(e) {
+        e.preventDefault();
+        productFormError.textContent = '';
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+
+        const sku = productForm.sku.value.trim();
+        const name = productForm.name.value.trim();
+        const category = productForm.category.value.trim();
+        const description = productForm.description.value.trim();
+        const originalPrice = parseFloat(productForm.originalPrice.value) || 0;
+        const discountAmount = parseFloat(productForm.discountAmount.value) || 0;
+        const discountPercent = parseFloat(productForm.discountPercent.value) || 0;
+
+        let finalPrice = originalPrice;
+        if (discountPercent > 0) finalPrice = originalPrice - (originalPrice * (discountPercent / 100));
+        else if (discountAmount > 0) finalPrice = originalPrice - discountAmount;
+        finalPrice = Math.max(0, Math.round(finalPrice));
+
+        const productObj = {
+            sku, name, category, description,
+            price: finalPrice,
+            originalPrice,
+            sizes: productForm.sizes.value.split(',').map(s=>s.trim()).filter(s=>s),
+            images: productForm.images.value.split(',').map(s=>s.trim()).filter(s=>s),
+            isPopular: productForm.isPopular.checked,
+            isOnlinePaymentRequired: productForm.isOnlinePaymentRequired.checked,
+            discountAmount: discountAmount || 0,
+            discountPercent: discountPercent || 0
+        };
+
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+            if (currentEditingProductId) {
+                const productDocPath = `artifacts/${appId}/public/data/products/${currentEditingProductId}`;
+                await updateDoc(doc(db, productDocPath), productObj);
+                console.log('Product updated', currentEditingProductId);
+            } else {
+                const productsCollectionPath = `artifacts/${appId}/public/data/products`;
+                await addDoc(collection(db, productsCollectionPath), productObj);
+                console.log('Product added');
+            }
+            resetProductForm();
+        } catch (err) {
+            productFormError.textContent = `Error: ${err.message}`;
+        }
+    }
+
+    function handleEditProduct(productId) {
+        fetchProductForEdit(productId);
+    }
+    async function fetchProductForEdit(productId) {
+        const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+        const pDocPath = `artifacts/${appId}/public/data/products/${productId}`;
+        try {
+            const d = await getDoc(doc(db, pDocPath));
+            if (!d.exists()) return;
+            const p = d.data();
+            currentEditingProductId = productId;
+            productFormTitle.textContent = 'Edit Product';
+            cancelEditButton.classList.remove('hidden');
+            productForm.sku.value = p.sku || '';
+            productForm.name.value = p.name || '';
+            productForm.category.value = p.category || '';
+            productForm.description.value = p.description || '';
+            productForm.originalPrice.value = p.originalPrice || 0;
+            productForm.price.value = p.price || 0;
+            productForm.sizes.value = (p.sizes || []).join(', ');
+            productForm.images.value = Array.isArray(p.images) ? p.images.join(', ') : (p.images || '');
+            productForm.isPopular.checked = p.isPopular || false;
+            productForm.isOnlinePaymentRequired.checked = p.isOnlinePaymentRequired || false;
+            productForm.discountAmount.value = p.discountAmount || 0;
+            productForm.discountPercent.value = p.discountPercent || 0;
+            window.scrollTo(0,0);
+        } catch (err) { alert('Error loading product: ' + err.message); }
+    }
+
+    function resetProductForm() {
+        productForm.reset();
+        currentEditingProductId = null;
+        productFormTitle.textContent = 'Add a New Product';
+        cancelEditButton.classList.add('hidden');
+        productFormError.textContent = '';
+    }
+
+    async function handleDeleteProduct(productId, productName) {
+        if (!confirm(`Delete "${productName}"? This cannot be undone.`)) return;
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+            await deleteDoc(doc(db, `artifacts/${appId}/public/data/products/${productId}`));
+            console.log('Deleted', productId);
+        } catch (err) { alert('Error deleting product: ' + err.message); }
+    }
+
+    async function handleUpdateOrderStatus(orderId, newStatus) {
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+            await updateDoc(doc(db, `artifacts/${appId}/public/data/orders/${orderId}`), { status: newStatus });
+            console.log('Order status updated');
+        } catch (err) { console.error(err); }
+    }
+
+    async function handleSettingsFormSubmit(e) {
+        e.preventDefault();
+        settingsSaveStatus.textContent = 'Saving...';
+        const adBanners = [
+            { img: settingsForm.banner1_img.value, text: settingsForm.banner1_text.value },
+            { img: settingsForm.banner2_img.value, text: settingsForm.banner2_text.value },
+            { img: settingsForm.banner3_img.value, text: settingsForm.banner3_text.value }
+        ].filter(b => b.img);
+        const categoryList = [
+            settingsForm.cat1_name.value,
+            settingsForm.cat2_name.value,
+            settingsForm.cat3_name.value
+        ].map(s => s?.trim()).filter(s => s);
+        const settingsData = {
+            paymentNumber: settingsForm.paymentNumber.value,
+            logoUrl: settingsForm.logoUrl.value,
+            adBanners,
+            categoryList
+        };
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+            await setDoc(doc(db, `artifacts/${appId}/public/data/config/siteSettings`), settingsData, { merge: true });
+            settingsSaveStatus.textContent = 'Saved!';
+        } catch (err) {
+            settingsSaveStatus.textContent = `Error: ${err.message}`;
+        }
+        setTimeout(()=>settingsSaveStatus.textContent='', 3000);
+    }
+
+    async function handleCouponFormSubmit(e) {
+        e.preventDefault();
+        couponSaveStatus.textContent = '';
+        const code = couponForm.couponCode.value.toUpperCase().trim();
+        const type = couponForm.couponType.value;
+        const amount = parseFloat(couponForm.couponAmount.value);
+        const allowedRaw = couponForm.allowedProducts.value || '';
+        const allowedProducts = allowedRaw.split(',').map(s=>s.trim()).filter(s=>s);
+        let usageLimit = parseInt(couponForm.usageLimit.value);
+        if (isNaN(usageLimit) || usageLimit < 0) usageLimit = 0;
+        if (usageLimit > 500) usageLimit = 500;
+
+        if (!code || !amount || (type !== 'fixed' && type !== 'percent')) {
+            couponSaveStatus.textContent = 'Please fill valid code, type and amount.';
+            return;
+        }
+
+        couponSaveStatus.textContent = 'Saving...';
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+            const couponsRef = doc(db, `artifacts/${appId}/public/data/config/coupons`);
+            const snap = await getDoc(couponsRef);
+            const existing = snap.exists() ? snap.data().validCodes : [];
+            if (existing.find(c => c.code === code)) {
+                couponSaveStatus.textContent = 'Coupon already exists.';
+                return;
+            }
+
+            const couponObj = {
+                code,
+                type,
+                amount,
+                allowedProducts,
+                usageLimit // 0 = unlimited
+            };
+            const newList = [...existing, couponObj];
+            await setDoc(couponsRef, { validCodes: newList });
+            couponForm.reset();
+            couponSaveStatus.textContent = 'Coupon added!';
+        } catch (err) {
+            couponSaveStatus.textContent = `Error: ${err.message}`;
+        }
+        setTimeout(()=>couponSaveStatus.textContent='', 3000);
+    }
+
+    async function handleDeleteCoupon(codeToDelete) {
+        if (!confirm(`Delete coupon ${codeToDelete}?`)) return;
+        try {
+            const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+            const couponsRef = doc(db, `artifacts/${appId}/public/data/config/coupons`);
+            const snap = await getDoc(couponsRef);
+            const existing = snap.exists() ? snap.data().validCodes : [];
+            const newList = existing.filter(c => c.code !== codeToDelete);
+            await setDoc(couponsRef, { validCodes: newList });
+        } catch (err) {
+            alert('Error deleting coupon: ' + err.message);
+        }
+    }
+
+    // ----- ATTACH / INIT -----
+    document.addEventListener('DOMContentLoaded', () => {
+        // query elements
+        loadingIndicator = document.getElementById('loading-indicator');
+        loginScreen = document.getElementById('login-screen');
+        adminDashboard = document.getElementById('admin-dashboard');
+        loginForm = document.getElementById('login-form');
+        loginError = document.getElementById('login-error');
+        adminEmailDisplay = document.getElementById('admin-email-display');
+        logoutButton = document.getElementById('logout-button');
+        tabs = document.querySelectorAll('.admin-tab');
+        tabContents = document.querySelectorAll('.tab-content');
+
+        productForm = document.getElementById('product-form');
+        productFormTitle = document.getElementById('product-form-title');
+        productFormError = document.getElementById('product-form-error');
+        cancelEditButton = document.getElementById('cancel-edit-button');
+        productsList = document.getElementById('products-list');
+
+        ordersList = document.getElementById('orders-list');
+
+        settingsForm = document.getElementById('settings-form');
+        settingsSaveStatus = document.getElementById('settings-save-status');
+
+        couponForm = document.getElementById('coupon-form');
+        couponList = document.getElementById('coupon-list');
+        couponSaveStatus = document.getElementById('coupon-save-status');
+
+        orderModal = document.getElementById('order-modal');
+        orderModalContent = document.getElementById('order-modal-content');
+        orderModalClose = document.getElementById('order-modal-close');
+
+        categoriesList = document.getElementById('categories-list');
+        categoryAddInput = document.getElementById('category-add-input');
+        addCategoryBtn = document.getElementById('add-category-btn');
+
+        // attach events
+        loginForm.addEventListener('submit', handleLogin);
+        logoutButton.addEventListener('click', handleLogout);
+        tabs.forEach(tab => tab.addEventListener('click', handleTabClick));
+        productForm.addEventListener('submit', handleProductFormSubmit);
+        cancelEditButton.addEventListener('click', resetProductForm);
+        settingsForm.addEventListener('submit', handleSettingsFormSubmit);
+        couponForm.addEventListener('submit', handleCouponFormSubmit);
+        orderModalClose.addEventListener('click', () => orderModal.style.display = 'none');
+        window.addEventListener('click', e => { if (e.target === orderModal) orderModal.style.display = 'none'; });
+
+        addCategoryBtn.addEventListener('click', async () => {
+            const name = categoryAddInput.value.trim();
+            if (!name) return;
+            try {
+                const appId = typeof __app_id !== 'undefined' ? __app_id : 'WideFind';
+                const settingsRef = doc(db, `artifacts/${appId}/public/data/config/siteSettings`);
+                const snap = await getDoc(settingsRef);
+                const existingCats = snap.exists() ? (snap.data().categoryList || []) : [];
+                const newCats = [...existingCats, name];
+                await setDoc(settingsRef, { categoryList: newCats }, { merge: true });
+                categoryAddInput.value = '';
+            } catch (err) {
+                alert('Error adding category: ' + err.message);
+            }
+        });
+
+        initializeFirebase();
+    });
+</script>
+
+<!-- Loading -->
+<div id="loading-indicator" class="fixed inset-0 bg-white flex items-center justify-center z-50">
+    <div class="text-center">
+        <i class="fas fa-spinner fa-spin text-4xl text-orange-600"></i>
+        <p class="mt-2 text-lg font-semibold text-gray-700">Loading Admin Panel...</p>
+    </div>
+</div>
+
+<!-- Login screen -->
+<div id="login-screen" class="min-h-screen flex items-center justify-center bg-gray-200 hidden">
+    <div class="bg-white p-8 rounded-lg shadow-xl w-full max-w-sm">
+        <h1 class="text-3xl font-bold text-center text-orange-600 mb-6">WideFind Admin</h1>
+        <form id="login-form">
+            <div class="mb-4">
+                <label class="block text-sm font-medium">Email</label>
+                <input type="email" name="email" required class="mt-1 block w-full p-2 border rounded">
+            </div>
+            <div class="mb-6">
+                <label class="block text-sm font-medium">Password</label>
+                <input type="password" name="password" required class="mt-1 block w-full p-2 border rounded">
+            </div>
+            <button class="w-full bg-orange-600 text-white p-2 rounded">Sign In</button>
+            <p id="login-error" class="text-red-500 text-sm mt-3"></p>
+        </form>
+    </div>
+</div>
+
+<!-- Admin dashboard -->
+<div id="admin-dashboard" class="hidden">
+    <header class="bg-white shadow-md">
+        <div class="container mx-auto px-4 py-3 flex justify-between items-center">
+            <h1 class="text-2xl font-bold text-orange-600">WideFind Admin Panel</h1>
+            <div class="flex items-center">
+                <span id="admin-email-display" class="text-sm text-gray-600 mr-4"></span>
+                <button id="logout-button" class="bg-red-500 text-white px-4 py-2 rounded">Log Out</button>
+            </div>
+        </div>
+    </header>
+
+    <nav class="bg-white shadow-sm sticky top-0 z-10">
+        <div class="container mx-auto px-4">
+            <div class="flex space-x-1">
+                <a href="#products" class="admin-tab bg-orange-600 text-white px-4 py-3 font-medium text-sm rounded-t-lg"><i class="fas fa-box-open mr-1"></i> Products</a>
+                <a href="#orders" class="admin-tab bg-gray-200 text-gray-700 px-4 py-3 font-medium text-sm rounded-t-lg"><i class="fas fa-receipt mr-1"></i> Orders</a>
+                <a href="#settings" class="admin-tab bg-gray-200 text-gray-700 px-4 py-3 font-medium text-sm rounded-t-lg"><i class="fas fa-cog mr-1"></i> Site Settings</a>
+                <a href="#coupons" class="admin-tab bg-gray-200 text-gray-700 px-4 py-3 font-medium text-sm rounded-t-lg"><i class="fas fa-tags mr-1"></i> Coupons</a>
+            </div>
+        </div>
+    </nav>
+
+    <main class="container mx-auto p-4">
+        <!-- Products -->
+        <div id="products" class="tab-content active">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Manage Products</h2>
+            <form id="product-form" class="bg-white p-6 rounded-lg shadow-md mb-6 space-y-4">
+                <h3 id="product-form-title" class="text-xl font-semibold">Add a New Product</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <input type="text" name="sku" placeholder="SKU (e.g., TSHIRT-001)" required class="p-2 border rounded">
+                    <input type="text" name="name" placeholder="Product Name" required class="p-2 border rounded">
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-3 gap-4">
+                    <input type="number" name="price" placeholder="Sale Price (will be replaced by calculated price on save)" required class="p-2 border rounded">
+                    <input type="number" name="originalPrice" placeholder="Original Price (e.g., 1500)" required class="p-2 border rounded">
+                    <input type="text" name="category" placeholder="Category (e.g., T-Shirt)" required class="p-2 border rounded">
+                </div>
+
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-4">
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-1">Discount Amount (Fixed ৳)</label>
+                        <input type="number" name="discountAmount" placeholder="e.g., 100" class="p-2 border rounded w-full">
+                    </div>
+                    <div>
+                        <label class="block text-sm text-gray-600 mb-1">Discount % (%)</label>
+                        <input type="number" name="discountPercent" placeholder="e.g., 10" class="p-2 border rounded w-full">
+                    </div>
+                </div>
+
+                <textarea name="description" placeholder="Product Description..." rows="3" class="p-2 border rounded w-full"></textarea>
+                <input type="text" name="sizes" placeholder="Sizes (comma-separated)" class="p-2 border rounded w-full">
+                <input type="text" name="images" placeholder="Image URLs (comma-separated)" required class="p-2 border rounded w-full">
+                <div class="flex space-x-6">
+                    <label class="flex items-center"><input type="checkbox" name="isPopular" class="mr-2"> Mark as Popular</label>
+                    <label class="flex items-center"><input type="checkbox" name="isOnlinePaymentRequired" class="mr-2"> Require Online Payment</label>
+                </div>
+                <div class="flex items-center space-x-3">
+                    <button type="submit" class="bg-green-600 text-white px-5 py-2 rounded">Save Product</button>
+                    <button type="button" id="cancel-edit-button" class="bg-gray-500 text-white px-5 py-2 rounded hidden">Cancel Edit</button>
+                    <p id="product-form-error" class="text-red-500 text-sm"></p>
+                </div>
+            </form>
+
+            <div id="products-list-container" class="bg-white rounded-lg shadow-md overflow-x-auto">
+                <div id="products-list" class="p-4"><p class="text-gray-500">Loading products...</p></div>
+            </div>
+        </div>
+
+        <!-- Orders -->
+        <div id="orders" class="tab-content">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">View Orders</h2>
+            <div id="orders-list-container" class="bg-white rounded-lg shadow-md overflow-x-auto">
+                <div id="orders-list" class="p-4"><p class="text-gray-500">Loading orders...</p></div>
+            </div>
+        </div>
+
+        <!-- Settings -->
+        <div id="settings" class="tab-content">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Site Settings</h2>
+            <form id="settings-form" class="bg-white p-6 rounded-lg shadow-md space-y-4 max-w-2xl">
+                <h3 class="text-xl font-semibold border-b pb-2">General</h3>
+                <div>
+                    <label class="block text-sm font-medium">Logo Image URL</label>
+                    <input type="text" name="logoUrl" class="p-2 border rounded w-full mt-1">
+                </div>
+                <div>
+                    <label class="block text-sm font-medium">Payment Number</label>
+                    <input type="text" name="paymentNumber" class="p-2 border rounded w-full mt-1">
+                </div>
+
+                <h3 class="text-xl font-semibold border-b pb-2 pt-4">Ad Banners</h3>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 border rounded-md">
+                    <input type="text" name="banner1_img" placeholder="Banner 1 Image URL" class="p-2 border rounded w-full">
+                    <input type="text" name="banner1_text" placeholder="Banner 1 Text" class="p-2 border rounded w-full">
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 border rounded-md">
+                    <input type="text" name="banner2_img" placeholder="Banner 2 Image URL" class="p-2 border rounded w-full">
+                    <input type="text" name="banner2_text" placeholder="Banner 2 Text" class="p-2 border rounded w-full">
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-3 p-3 border rounded-md">
+                    <input type="text" name="banner3_img" placeholder="Banner 3 Image URL" class="p-2 border rounded w-full">
+                    <input type="text" name="banner3_text" placeholder="Banner 3 Text" class="p-2 border rounded w-full">
+                </div>
+
+                <h3 class="text-xl font-semibold border-b pb-2 pt-4">Category List (text-only)</h3>
+                <div class="p-3 border rounded-md">
+                    <div class="flex gap-3 mb-3">
+                        <input id="category-add-input" type="text" placeholder="Add category name" class="p-2 border rounded w-full">
+                        <button id="add-category-btn" type="button" class="bg-blue-600 text-white px-4 py-2 rounded">Add</button>
+                    </div>
+                    <ul id="categories-list" class="space-y-1"></ul>
+                </div>
+
+                <div class="flex items-center space-x-3">
+                    <button type="submit" class="bg-blue-600 text-white px-5 py-2 rounded">Save Settings</button>
+                    <p id="settings-save-status" class="text-green-600 text-sm"></p>
+                </div>
+            </form>
+        </div>
+
+        <!-- Coupons -->
+        <div id="coupons" class="tab-content">
+            <h2 class="text-2xl font-bold text-gray-800 mb-4">Manage Coupons</h2>
+            <div class="grid grid-cols-1 md:grid-cols-2 gap-6">
+                <form id="coupon-form" class="bg-white p-6 rounded-lg shadow-md space-y-4">
+                    <h3 class="text-xl font-semibold">Add New Coupon</h3>
+                    <div>
+                        <label class="block text-sm font-medium">Coupon Code</label>
+                        <input type="text" name="couponCode" placeholder="SAVE100" required class="p-2 border rounded w-full uppercase">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium">Discount Type</label>
+                        <select name="couponType" class="p-2 border rounded w-full">
+                            <option value="fixed">Fixed (৳ off)</option>
+                            <option value="percent">Percentage (%)</option>
+                        </select>
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium">Amount</label>
+                        <input type="number" name="couponAmount" placeholder="100 or 10" required class="p-2 border rounded w-full">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium">Allowed Products (optional)</label>
+                        <input type="text" name="allowedProducts" placeholder="comma-separated SKUs (leave empty for all)" class="p-2 border rounded w-full">
+                    </div>
+                    <div>
+                        <label class="block text-sm font-medium">Usage Limit (0 = unlimited, max 500)</label>
+                        <input type="number" name="usageLimit" min="0" max="500" value="0" class="p-2 border rounded w-full">
+                    </div>
+                    <div class="flex items-center space-x-3">
+                        <button type="submit" class="bg-green-600 text-white px-5 py-2 rounded">Add Coupon</button>
+                        <p id="coupon-save-status" class="text-sm"></p>
+                    </div>
+                </form>
+
+                <div class="bg-white p-6 rounded-lg shadow-md">
+                    <h3 class="text-xl font-semibold mb-4">Active Coupons</h3>
+                    <div id="coupon-list" class="space-y-2"><p class="text-gray-500">Loading coupons...</p></div>
+                </div>
+            </div>
+        </div>
+
+    </main>
+</div>
+
+<!-- Order modal -->
+<div id="order-modal" class="modal">
+    <div class="modal-content relative">
+        <button id="order-modal-close" class="absolute top-4 right-6 text-2xl font-bold text-gray-500 hover:text-gray-800">&times;</button>
+        <div id="order-modal-content" class="text-gray-800"></div>
+    </div>
+</div>
+
+</body>
+</html>
